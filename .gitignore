@@ -1,12 +1,4 @@
 .DS_Store
 
-# Compiled binaries — reproducible via build.sh / bundle.sh
-/airprobe
-/probe
-/taptest
-/tapkey
-/mutetest
-/speak-duck
-
 # App bundle build output (packaged into SpeakDuck.dmg)
 SpeakDuck.app/
