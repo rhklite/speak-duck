@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#00D4F0"></stop>
+      <stop offset="1" stop-color="#0099BB"></stop>
+    </linearGradient>
+    <linearGradient id="band" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#44E4FF"></stop>
+      <stop offset="1" stop-color="#00D4F0"></stop>
+    </linearGradient>
+    <linearGradient id="cup" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#C0F7FF"></stop>
+      <stop offset="1" stop-color="#80EEFF"></stop>
+    </linearGradient>
+    <linearGradient id="duck" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F9DC72"></stop>
+      <stop offset="1" stop-color="#EDB830"></stop>
+    </linearGradient>
+  </defs>
+
+  
+  <rect width="100" height="100" fill="url(#bg)"></rect>
+
+  
+  <path d="M 26 46 Q 41 10 74 46" fill="none" stroke="rgba(0,0,0,0.18)" stroke-width="9" stroke-linecap="round"></path>
+  
+  <path d="M 26 46 Q 41 10 74 46" fill="none" stroke="url(#band)" stroke-width="7" stroke-linecap="round"></path>
+  
+  <path d="M 28 43 Q 41 13 72 43" fill="none" stroke="rgba(255,255,255,0.28)" stroke-width="2" stroke-linecap="round"></path>
+
+  
+  <rect x="23" y="37" width="5" height="14" rx="2.5" fill="url(#cup)"></rect>
+  <rect x="72" y="37" width="5" height="14" rx="2.5" fill="url(#cup)"></rect>
+
+  
+  <circle cx="50" cy="58" r="23" fill="url(#duck)"></circle>
+
+  
+  <path d="M 68 55 L 84 58 L 68 62 Z" fill="#E0922A" stroke="#E0922A" stroke-width="1.4" stroke-linejoin="round"></path>
+
+  
+  <circle cx="56" cy="51" r="3" fill="#0a1a1e"></circle>
+  <circle cx="57.2" cy="50" r="1" fill="white"></circle>
+
+  
+  <ellipse cx="25" cy="54" rx="10" ry="13" fill="url(#cup)"></ellipse>
+  <ellipse cx="25" cy="54" rx="7" ry="9.5" fill="#00D4F0"></ellipse>
+  <ellipse cx="25" cy="54" rx="4.5" ry="6" fill="url(#band)"></ellipse>
+
+  
+  <ellipse cx="74" cy="54" rx="10" ry="13" fill="url(#cup)"></ellipse>
+  <ellipse cx="74" cy="54" rx="7" ry="9.5" fill="#00D4F0"></ellipse>
+  <ellipse cx="74" cy="54" rx="4.5" ry="6" fill="url(#band)"></ellipse>
+
+  
+  <circle cx="85" cy="47" r="3.2" fill="url(#cup)" stroke="rgba(255,255,255,0.3)" stroke-width="0.8"></circle>
+</svg>
