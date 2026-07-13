@@ -43,6 +43,16 @@ func uint32Prop(_ obj: AudioObjectID, _ selector: AudioObjectPropertySelector) -
     return value
 }
 
+func pidProp(_ obj: AudioObjectID) -> pid_t {
+    var addr = AudioObjectPropertyAddress(
+        mSelector: kAudioProcessPropertyPID, mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain)
+    var value: pid_t = -1
+    var size = UInt32(MemoryLayout<pid_t>.size)
+    _ = AudioObjectGetPropertyData(obj, &addr, 0, nil, &size, &value)
+    return value
+}
+
 func bundleID(_ obj: AudioObjectID) -> String? {
     var addr = AudioObjectPropertyAddress(
         mSelector: kAudioProcessPropertyBundleID, mScope: kAudioObjectPropertyScopeGlobal,
@@ -140,7 +150,17 @@ func log(_ msg: String) { print("\(stamp.string(from: Date()))  \(msg)") }
 let DEBUG = ProcessInfo.processInfo.environment["SPEAKDUCK_DEBUG"] != nil
 func dlog(_ msg: String) { if DEBUG { log("· \(msg)") } }
 
-// MARK: - Universal duck engine (on-demand mute)
+// MARK: - Action modes
+
+/// What the engine does while Spoken Content is talking.
+/// - off:   nothing (armed but idle).
+/// - duck:  lower/mute all background audio via the process tap (original behavior).
+/// - pause: pause the macOS "Now Playing" source via a synthesized play/pause media
+///          key, then resume it when speech ends. Reaches any Now-Playing-aware
+///          source (Music, Spotify, Safari, modern Chrome, and iPhone→Mac AirPlay).
+enum DuckMode: Int { case off = 0, duck = 1, pause = 2 }
+
+// MARK: - Universal duck engine (on-demand duck / pause)
 
 final class DuckEngine {
     private let voiceBundle: String
@@ -157,10 +177,21 @@ final class DuckEngine {
         set { gainPtr.pointee = max(0, min(1, newValue)) }
     }
 
+    /// Called on the main queue when an action becomes active (true) or clears
+    /// (false) — used by the menu-bar UI to update its icon and status line.
     var onMute: ((Bool) -> Void)?
 
-    var enabled = true {
-        didSet { queue.async { [self] in if !enabled { pendingEnd?.cancel(); pendingEnd = nil; endMute() } } }
+    /// Injected by the AppKit layer: synthesizes a play/pause media key. Used only
+    /// in `.pause` mode (Core Audio can't pause a source, only intercept its output).
+    var sendPlayPause: (() -> Void)?
+
+    /// Active action mode. Changing it live tears down whatever the old mode was
+    /// doing (restores volume / resumes media) so we never leave media stuck.
+    var mode: DuckMode = .duck {
+        didSet {
+            guard mode != oldValue else { return }
+            queue.async { [self] in pendingEnd?.cancel(); pendingEnd = nil; end() }
+        }
     }
 
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -169,7 +200,9 @@ final class DuckEngine {
     private var playDev = AudioObjectID(kAudioObjectUnknown)
     private var playProc: AudioDeviceIOProcID?
     private let ring = FloatRing(capacity: 1 << 17)   // ~1.3 s stereo @ 48 kHz
-    private var muting = false
+    private var muting = false          // duck action active (tap up)
+    private var paused = false          // pause action active (media paused by us)
+    private var active: Bool { muting || paused }
     private var pendingEnd: DispatchWorkItem?
     private let queue = DispatchQueue(label: "speak-duck.engine")
     private var pollTimer: DispatchSourceTimer?
@@ -188,7 +221,7 @@ final class DuckEngine {
     @discardableResult
     func start() -> Bool {
         let p = DispatchSource.makeTimerSource(queue: queue)
-        p.schedule(deadline: .now() + 0.12, repeating: 0.12)
+        p.schedule(deadline: .now() + 0.05, repeating: 0.05)
         p.setEventHandler { [weak self] in self?.poll() }
         p.resume(); pollTimer = p
         dlog("engine started for \(voiceBundle)")
@@ -197,20 +230,68 @@ final class DuckEngine {
 
     func stop() {
         pollTimer?.cancel(); pollTimer = nil
-        queue.sync { pendingEnd?.cancel(); pendingEnd = nil; endMute() }
+        queue.sync { pendingEnd?.cancel(); pendingEnd = nil; end() }   // resume media if paused
     }
 
     private func poll() {
+        if mode == .off { return }
         let objs = voiceObjects()
         let speaking = objs.contains { uint32Prop($0, kAudioProcessPropertyIsRunningOutput) != 0 }
         if speaking {
             pendingEnd?.cancel(); pendingEnd = nil
-            if !muting { beginMute(excluding: objs) }
-        } else if muting, pendingEnd == nil {
-            let w = DispatchWorkItem { [weak self] in self?.endMute(); self?.pendingEnd = nil }
+            if !active { begin(excluding: objs) }
+        } else if active, pendingEnd == nil {
+            let w = DispatchWorkItem { [weak self] in self?.end(); self?.pendingEnd = nil }
             pendingEnd = w
             queue.asyncAfter(deadline: .now() + resumeDelay, execute: w)
         }
+    }
+
+    // Dispatch the current mode's start/stop action. `end()` keys off the active
+    // flags (not `mode`) so a mid-action mode switch still unwinds correctly.
+    private func begin(excluding objs: [AudioObjectID]) {
+        switch mode {
+        case .off:   break
+        case .duck:  beginMute(excluding: objs)
+        case .pause: beginPause(voice: objs)
+        }
+    }
+
+    private func end() {
+        if muting { endMute() }
+        if paused { endPause() }
+    }
+
+    // MARK: Pause action (media-key)
+
+    // True if any process other than the voice and ourselves is currently producing
+    // output. Guards the pause toggle: play/pause is a *toggle*, so firing it while
+    // nothing plays would START playback — we only pause when media is actually on.
+    private func mediaIsPlaying(excluding voice: [AudioObjectID]) -> Bool {
+        let voiceSet = Set(voice)
+        let me = getpid()
+        for obj in processList() {
+            if voiceSet.contains(obj) || pidProp(obj) == me { continue }
+            if uint32Prop(obj, kAudioProcessPropertyIsRunningOutput) != 0 { return true }
+        }
+        return false
+    }
+
+    private func beginPause(voice: [AudioObjectID]) {
+        guard mode == .pause else { return }
+        guard mediaIsPlaying(excluding: voice) else { dlog("pause: nothing playing → skip"); return }
+        sendPlayPause?()
+        paused = true
+        log("speaking → media paused")
+        DispatchQueue.main.async { self.onMute?(true) }
+    }
+
+    private func endPause() {
+        guard paused else { return }
+        paused = false
+        sendPlayPause?()
+        log("speech ended → media resumed")
+        DispatchQueue.main.async { self.onMute?(false) }
     }
 
     // Start the replay IOProc on the real output device: pulls captured background
@@ -250,7 +331,7 @@ final class DuckEngine {
     }
 
     private func beginMute(excluding objs: [AudioObjectID]) {
-        guard enabled else { return }
+        guard mode == .duck else { return }
 
         // Partial duck: start replay first, then exclude ourselves from the tap.
         var excluded = objs
