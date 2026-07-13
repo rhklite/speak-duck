@@ -56,6 +56,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+xattr -cr "$APP"   # strip Finder info / resource forks; codesign rejects them
+
 # --- Stable code signing: sign with a fixed self-signed identity so the app's
 # designated requirement stays constant across rebuilds, preserving TCC grants
 # (notably Accessibility for pause mode). Falls back to ad-hoc if absent.
