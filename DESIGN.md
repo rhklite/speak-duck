@@ -45,41 +45,35 @@ Earlier dead ends (kept for the record): MediaRemote (gated / blind to Chrome),
 synthesized media keys (Chrome not in Now Playing), per-tab AppleScript+JS
 (worked but Chrome-only). All replaced by the universal tap.
 
-## Pause mode (media-key)
-A menu radio picks the action taken while speaking: **Do nothing** / **Lower volume**
-(the tap above) / **Pause media**. One action runs at a time — pause does *not* also
-duck. The mode lives on `DuckEngine` (`.off/.duck/.pause`); the same 0.05 s poll and
-0.3 s resume debounce drive both duck and pause, and changing mode live unwinds
-whatever was active (restores volume / resumes media) so media is never left stuck.
+## Modes & triggers (one mechanism)
+There is a single suppression mechanism — the Core Audio tap above — and it is the
+*only* way media is quieted. It has one knob (a target gain: 0 = full mute, >0 = lower
+to that fraction) and is driven by two independent triggers that share the same
+begin/resume path. The only difference between them is what turns it on.
 
-Pause works by synthesizing the hardware **Play/Pause key** (`NX_KEYTYPE_PLAY`, via
-`NSEvent .systemDefined` → `cgEvent.post(.cghidEventTap)`). macOS routes it to the
-current *Now Playing* session, so unlike the old dead-ends this reaches Safari and
-modern Chrome/YouTube (which now register with Now Playing) — and, notably, an
-**iPhone AirPlaying to this Mac**: the key is forwarded back to the phone, the same
-path Control Center's Now Playing controls use. Per-app AppleScript could never do
-that; this is why media-key won over per-app for the AirPlay case.
+A menu radio picks the while-speaking action: **Do nothing** (`.off`) / **Lower volume**
+(`.duck`, tap at the slider level) / **Pause media** (`.pause`, tap at gain 0 = full
+mute). `DuckEngine.poll()` (0.05 s) computes a target gain from the live triggers via
+`desiredGain()`, brings the tap up/down, and applies the 0.3 s resume debounce; the tap
+crosses the mute↔partial boundary by tearing down and rebuilding, and a partial-level
+change is written live to `gainPtr`.
 
-Guards & caveats:
-- Play/Pause is a *toggle*, so we only fire it when something is actually playing
-  (any non-voice, non-self process with `IsRunningOutput`) — else it would *start*
-  playback. Resume is driven by our own "we paused" flag, not by re-polling.
-- Posting keys to other apps needs **Accessibility** (System Settings → Privacy &
-  Security → Accessibility). Choosing pause mode the first time prompts for it; the
-  action degrades quietly if denied. Ad-hoc re-signing can drop the grant → re-add.
-- Only the single Now Playing app is paused (not every source at once, the way
-  ducking mutes everything). Verify AirPlay-from-iPhone routing on hardware.
+An earlier design paused only the single *Now Playing* app by synthesizing the
+Play/Pause media key. That was dropped: it reached one app at a time (not universal),
+depended on flaky Now-Playing registration (Chrome), and needed an Accessibility grant
+that ad-hoc re-signing kept invalidating. The tap mutes **every** source at once with
+no permission, which is what "pause all media" actually requires.
 
 ## Pause while dictating
-A separate trigger, independent of the while-speaking mode: whenever a dictation app
-holds the mic, pause the current Now Playing source so playback doesn't bleed into the
+A second trigger for the same tap, independent of the while-speaking mode: whenever a
+dictation app holds the mic, full-mute all output so playback doesn't bleed into the
 transcription. Detection mirrors the Spoken-Content output check on the input side —
-poll for any process whose bundle id starts with `com.electron.wispr-flow` reporting
+any process whose bundle id starts with `com.electron.wispr-flow` reporting
 `kAudioProcessPropertyIsRunningInput != 0`. Validated: Wispr Flow's helper flips that
-flag only while actively dictating and clears it on stop, so the same 0.3 s resume
-debounce applies. Always pauses (never ducks) and reuses the `.pause` media-key path,
-so it needs the same Accessibility grant. Menu toggle "Pause media while dictating",
-on by default; turn off Wispr Flow's own mute so the two don't both act.
+flag only while actively dictating and clears it on stop. `desiredGain()` returns 0
+(full mute) whenever this trigger is active, so it wins over a concurrent duck. Menu
+toggle "Pause media while dictating", on by default; turn off Wispr Flow's own mute so
+the two don't both act.
 
 ## Files
 - `Engine.swift` — tap-based mute engine + Core Audio helpers.

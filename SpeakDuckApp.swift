@@ -4,43 +4,13 @@
 // Run:  open SpeakDuck.app
 
 import AppKit
-import ApplicationServices
 import ServiceManagement
 
 let TARGET_BUNDLE_ID = "com.apple.accessibility.AXVisualSupportAgent"  // Speak Selection + hover-speak
 let RESUME_DELAY: TimeInterval = 0.3
 
-// MARK: - Media-key play/pause
-
-// Synthesize the hardware Play/Pause key (NX_KEYTYPE_PLAY = 16). macOS routes it to
-// the current "Now Playing" session — a local app (Music/Spotify/Safari/Chrome) or,
-// when the Mac is an AirPlay receiver, forwarded back to the iPhone that's playing.
-// Posting to other apps requires this app be trusted for Accessibility (granted once
-// in System Settings → Privacy & Security → Accessibility).
-private let NX_KEYTYPE_PLAY: Int = 16
-
-func postPlayPauseKey() {
-    func post(down: Bool) {
-        let state = down ? 0xA : 0xB
-        let data1 = (NX_KEYTYPE_PLAY << 16) | (state << 8)
-        let flags = NSEvent.ModifierFlags(rawValue: UInt(down ? 0xA00 : 0xB00))
-        guard let ev = NSEvent.otherEvent(
-            with: .systemDefined, location: .zero, modifierFlags: flags,
-            timestamp: 0, windowNumber: 0, context: nil,
-            subtype: 8 /* NX_SUBTYPE_AUX_CONTROL_BUTTONS */, data1: data1, data2: -1)
-        else { return }
-        ev.cgEvent?.post(tap: .cghidEventTap)
-    }
-    post(down: true); post(down: false)
-}
-
-/// True if Accessibility is granted. Passing prompt=true surfaces the system prompt
-/// (and adds us to the Accessibility list) the first time pause mode is chosen.
-@discardableResult
-func accessibilityTrusted(prompt: Bool) -> Bool {
-    let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
-    return AXIsProcessTrustedWithOptions(opts)
-}
+// Suppression is done entirely by the Core Audio tap in Engine.swift — it mutes/lowers
+// ALL output universally, so no media-key posting and no Accessibility grant are needed.
 
 @main
 struct SpeakDuckApp {
@@ -78,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pauseWhileDictating = true   // pause media while dictating, on by default
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        setvbuf(stdout, nil, _IONBF, 0)   // flush debug logs immediately when captured to a file
         if let raw = UserDefaults.standard.object(forKey: modeKey) as? Int, let m = DuckMode(rawValue: raw) {
             mode = m
         }
@@ -92,7 +63,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let engine = DuckEngine(voiceBundle: TARGET_BUNDLE_ID, resumeDelay: RESUME_DELAY, duckLevel: duckLevel)
         engine.mode = mode
         engine.pauseWhileDictating = pauseWhileDictating
-        engine.sendPlayPause = { postPlayPauseKey() }
         engine.onMute = { [weak self] m in self?.muting = m; self?.refresh() }
         engine.start()
         self.engine = engine
@@ -239,11 +209,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggleDictate() {
         pauseWhileDictating.toggle()
-        // Pausing media posts media keys to other apps → needs Accessibility, same as
-        // pause mode. Prompt the first time it's enabled without the grant.
-        if pauseWhileDictating && !accessibilityTrusted(prompt: false) {
-            accessibilityTrusted(prompt: true)
-        }
         UserDefaults.standard.set(pauseWhileDictating, forKey: dictateKey)
         engine?.pauseWhileDictating = pauseWhileDictating
         refresh()
@@ -254,11 +219,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setMode(_ m: DuckMode) {
-        // Pause mode posts media keys to other apps → needs Accessibility. Prompt the
-        // first time it's chosen without the grant; the action degrades quietly if denied.
-        if m == .pause && !accessibilityTrusted(prompt: false) {
-            accessibilityTrusted(prompt: true)
-        }
         mode = m
         UserDefaults.standard.set(m.rawValue, forKey: modeKey)
         engine?.mode = m
