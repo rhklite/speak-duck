@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.2 — 2026-07-13
+
+### Fixed
+- The 1.1.1 audibility check never detected playing media, so pause-on-read and
+  pause-on-dictation stopped firing: its 120 ms sampling window was shorter than
+  the audio tap's ~175 ms warm-up, so it always read silence. The probe now
+  samples up to 600 ms with early exit (~200 ms typical when media is playing).
+- Debug logging is now unbuffered, and SPEAKDUCK_PROBE_TEST=1 runs a one-shot
+  probe self-test at launch.
+
 ## 1.1.1 — 2026-07-13
 
 ### Fixed

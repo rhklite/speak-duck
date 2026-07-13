@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pauseWhileDictating = true   // pause media while dictating, on by default
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        setvbuf(stdout, nil, _IONBF, 0)   // flush debug logs immediately when captured to a file
         if let raw = UserDefaults.standard.object(forKey: modeKey) as? Int, let m = DuckMode(rawValue: raw) {
             mode = m
         }

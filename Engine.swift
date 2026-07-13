@@ -233,6 +233,14 @@ final class DuckEngine {
         p.setEventHandler { [weak self] in self?.poll() }
         p.resume(); pollTimer = p
         dlog("engine started for \(voiceBundle)")
+        // Debug self-test: SPEAKDUCK_PROBE_TEST=1 measures the audibility probe once
+        // at launch (with and without exclusions) and logs the peaks.
+        if ProcessInfo.processInfo.environment["SPEAKDUCK_PROBE_TEST"] != nil {
+            queue.asyncAfter(deadline: .now() + 1.0) { [self] in
+                let peak = audibleMediaPeak(excluding: voiceObjects(), window: probeWindow)
+                log("PROBE TEST peak=\(peak)")
+            }
+        }
         return true
     }
 
@@ -305,7 +313,7 @@ final class DuckEngine {
     // then would START media the user had deliberately stopped. So when flags say
     // "playing", verify there is actually AUDIBLE audio by sampling the real mix for
     // a moment with a capture-only (unmuted) tap before arming the resume.
-    private let probeWindow: TimeInterval = 0.12
+    private let probeWindow: TimeInterval = 0.6        // must exceed ~175 ms tap warm-up
     private let probeThreshold: Float = 0.001          // ~-60 dBFS peak
     private var lastSilentProbe: Date?                 // throttles re-probing while silent
 
@@ -326,10 +334,13 @@ final class DuckEngine {
         DispatchQueue.main.async { self.onMute?(true) }
     }
 
-    /// Peak absolute sample of all non-voice/self/dictation output over `window`
-    /// seconds, measured via a capture-only tap (muteBehavior .unmuted — audio is
-    /// unaffected). Returns +inf if the probe can't be built, so callers fail open
-    /// (treat as playing) and behavior degrades to the old flag-only guard.
+    /// Peak absolute sample of all non-voice/self/dictation output, measured via a
+    /// capture-only tap (muteBehavior .unmuted — audio is unaffected). The tap takes
+    /// ~175 ms to warm up before real audio flows (measured), so the probe samples
+    /// with early exit: it returns as soon as anything audible is seen and only
+    /// declares silence after `window` (which must comfortably exceed warm-up).
+    /// Returns +inf if the probe can't be built, so callers fail open (treat as
+    /// playing) and behavior degrades to the old flag-only guard.
     private func audibleMediaPeak(excluding voice: [AudioObjectID], window: TimeInterval) -> Float {
         var excluded = voice
         if let me = selfProcessObject() { excluded.append(me) }
@@ -377,7 +388,11 @@ final class DuckEngine {
         }
         guard AudioDeviceCreateIOProcIDWithBlock(&proc, probeAgg, nil, block) == noErr, let p = proc else { return .infinity }
         AudioDeviceStart(probeAgg, p)
-        usleep(useconds_t(window * 1_000_000))
+        let steps = max(1, Int(window / 0.025))
+        for _ in 0..<steps {
+            usleep(25_000)
+            if peakPtr.pointee > probeThreshold { break }   // audible → done early
+        }
         AudioDeviceStop(probeAgg, p)
         AudioDeviceDestroyIOProcID(probeAgg, p)
         return peakPtr.pointee
