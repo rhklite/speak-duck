@@ -2,3 +2,6 @@
 
 # App bundle build output (packaged into SpeakDuck.dmg)
 SpeakDuck.app/
+
+# Local code-signing key material (never commit)
+.signing/
