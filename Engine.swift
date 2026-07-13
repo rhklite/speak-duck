@@ -300,13 +300,87 @@ final class DuckEngine {
         return false
     }
 
+    // The output FLAG alone is not proof of playing media: players (Chrome notably)
+    // keep their output unit open for a while after the user pauses, and resuming
+    // then would START media the user had deliberately stopped. So when flags say
+    // "playing", verify there is actually AUDIBLE audio by sampling the real mix for
+    // a moment with a capture-only (unmuted) tap before arming the resume.
+    private let probeWindow: TimeInterval = 0.12
+    private let probeThreshold: Float = 0.001          // ~-60 dBFS peak
+    private var lastSilentProbe: Date?                 // throttles re-probing while silent
+
     private func beginPause(voice: [AudioObjectID]) {
         // No mode guard: callers gate this (begin() only for .pause; poll() for dictation).
         guard mediaIsPlaying(excluding: voice) else { dlog("pause: nothing playing → skip"); return }
+        if let t = lastSilentProbe, Date().timeIntervalSince(t) < 1.0 { return }
+        let peak = audibleMediaPeak(excluding: voice, window: probeWindow)
+        guard peak > probeThreshold else {
+            lastSilentProbe = Date()
+            dlog("pause: output open but silent (peak \(peak)) → skip")
+            return
+        }
+        lastSilentProbe = nil
         sendPause?()
         paused = true
         log("speaking → media paused")
         DispatchQueue.main.async { self.onMute?(true) }
+    }
+
+    /// Peak absolute sample of all non-voice/self/dictation output over `window`
+    /// seconds, measured via a capture-only tap (muteBehavior .unmuted — audio is
+    /// unaffected). Returns +inf if the probe can't be built, so callers fail open
+    /// (treat as playing) and behavior degrades to the old flag-only guard.
+    private func audibleMediaPeak(excluding voice: [AudioObjectID], window: TimeInterval) -> Float {
+        var excluded = voice
+        if let me = selfProcessObject() { excluded.append(me) }
+        for obj in processList() {
+            if let b = bundleID(obj), b.hasPrefix(dictationPrefix) { excluded.append(obj) }
+        }
+        let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
+        desc.name = "speak-duck-probe"; desc.isPrivate = true; desc.muteBehavior = .unmuted
+        var probeTap = AudioObjectID(kAudioObjectUnknown)
+        guard AudioHardwareCreateProcessTap(desc, &probeTap) == noErr else { return .infinity }
+        defer { AudioHardwareDestroyProcessTap(probeTap) }
+        guard let outUID = deviceUID(defaultOutputDevice()) else { return .infinity }
+        let dict: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "speak-duck-probe-agg",
+            kAudioAggregateDeviceUIDKey: "speak-duck-probe-agg-\(getpid())",
+            kAudioAggregateDeviceMainSubDeviceKey: outUID,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceSubDeviceListKey: [[kAudioSubDeviceUIDKey: outUID]],
+            kAudioAggregateDeviceTapListKey: [[
+                kAudioSubTapDriftCompensationKey: true,
+                kAudioSubTapUIDKey: desc.uuid.uuidString,
+            ]],
+        ]
+        var probeAgg = AudioObjectID(kAudioObjectUnknown)
+        guard AudioHardwareCreateAggregateDevice(dict as CFDictionary, &probeAgg) == noErr else { return .infinity }
+        defer { AudioHardwareDestroyAggregateDevice(probeAgg) }
+        let peakPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        peakPtr.initialize(to: 0)
+        defer { peakPtr.deallocate() }
+        var proc: AudioDeviceIOProcID?
+        let block: AudioDeviceIOBlock = { _, inData, _, out, _ in
+            let inBL = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData))
+            if inBL.count > 0, let src = inBL[0].mData {
+                let p = src.assumingMemoryBound(to: Float.self)
+                let n = Int(inBL[0].mDataByteSize) / MemoryLayout<Float>.size
+                var m = peakPtr.pointee
+                for i in 0..<n { let a = abs(p[i]); if a > m { m = a } }
+                peakPtr.pointee = m
+            }
+            for b in UnsafeMutableAudioBufferListPointer(out) {
+                if let d = b.mData { memset(d, 0, Int(b.mDataByteSize)) }
+            }
+        }
+        guard AudioDeviceCreateIOProcIDWithBlock(&proc, probeAgg, nil, block) == noErr, let p = proc else { return .infinity }
+        AudioDeviceStart(probeAgg, p)
+        usleep(useconds_t(window * 1_000_000))
+        AudioDeviceStop(probeAgg, p)
+        AudioDeviceDestroyIOProcID(probeAgg, p)
+        return peakPtr.pointee
     }
 
     private func endPause() {

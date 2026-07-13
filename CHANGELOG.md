@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1 — 2026-07-13
+
+### Fixed
+- Ending dictation (or a read) no longer restarts media the user had already
+  paused. Players like Chrome keep their audio output unit open for a while after
+  pausing, which fooled the playing-media guard into arming a resume. The guard now
+  verifies audible audio by briefly sampling the output mix with a capture-only tap
+  before arming the resume.
+
 ## 1.1.0 — 2026-07-13
 
 ### Added
