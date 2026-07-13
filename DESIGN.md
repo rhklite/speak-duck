@@ -45,35 +45,45 @@ Earlier dead ends (kept for the record): MediaRemote (gated / blind to Chrome),
 synthesized media keys (Chrome not in Now Playing), per-tab AppleScript+JS
 (worked but Chrome-only). All replaced by the universal tap.
 
-## Modes & triggers (one mechanism)
-There is a single suppression mechanism — the Core Audio tap above — and it is the
-*only* way media is quieted. It has one knob (a target gain: 0 = full mute, >0 = lower
-to that fraction) and is driven by two independent triggers that share the same
-begin/resume path. The only difference between them is what turns it on.
+## Pause mode (MediaRemote)
+A menu radio picks the action taken while speaking: **Do nothing** / **Lower volume**
+(the tap above) / **Pause media**. One action runs at a time — pause does *not* also
+duck. The mode lives on `DuckEngine` (`.off/.duck/.pause`); the same 0.05 s poll and
+0.3 s resume debounce drive both duck and pause, and changing mode live unwinds
+whatever was active (restores volume / resumes media) so media is never left stuck.
 
-A menu radio picks the while-speaking action: **Do nothing** (`.off`) / **Lower volume**
-(`.duck`, tap at the slider level) / **Pause media** (`.pause`, tap at gain 0 = full
-mute). `DuckEngine.poll()` (0.05 s) computes a target gain from the live triggers via
-`desiredGain()`, brings the tap up/down, and applies the 0.3 s resume debounce; the tap
-crosses the mute↔partial boundary by tearing down and rebuilding, and a partial-level
-change is written live to `gainPtr`.
+Pause sends **deterministic `MRMediaRemoteSendCommand` pause/play** (private
+MediaRemote framework via `dlopen`) — the same path Control Center's Now Playing
+controls use, reaching Music/Spotify/Safari/modern Chrome and iPhone→Mac AirPlay.
+An earlier iteration synthesized the hardware Play/Pause key instead; that was
+dropped after verifying (QuickTime A/B test, 2026-07-13) that media-key events are
+swallowed system-wide on this setup (dictation tools / Logitech agents grab them)
+while the MediaRemote command paused reliably. Explicit pause+play also can't
+invert state the way a blind key *toggle* could. Note: only send-command works —
+the now-playing *query* functions (`MRMediaRemoteGetNowPlaying*`) are gated on
+macOS 15.4+ and return empty, so the engine never relies on them.
 
-An earlier design paused only the single *Now Playing* app by synthesizing the
-Play/Pause media key. That was dropped: it reached one app at a time (not universal),
-depended on flaky Now-Playing registration (Chrome), and needed an Accessibility grant
-that ad-hoc re-signing kept invalidating. The tap mutes **every** source at once with
-no permission, which is what "pause all media" actually requires.
+Guards & caveats:
+- Resume ("play") fires only if we actually paused, and pause is skipped when no
+  media is playing (any non-voice, non-self, non-dictation process with
+  `IsRunningOutput`) — else the trailing "play" would start playback the user never
+  had. The dictation app is excluded from that check because its helper keeps an
+  output stream running even when idle.
+- **No permissions**: MediaRemote send needs no Accessibility/TCC grant (the old
+  media-key path did, and re-signing kept invalidating it).
+- Only the single Now Playing session is paused (not every source at once, the way
+  ducking mutes everything). Verify AirPlay-from-iPhone routing on hardware.
 
 ## Pause while dictating
-A second trigger for the same tap, independent of the while-speaking mode: whenever a
-dictation app holds the mic, full-mute all output so playback doesn't bleed into the
+A separate trigger, independent of the while-speaking mode: whenever a dictation app
+holds the mic, pause the Now Playing source so playback doesn't bleed into the
 transcription. Detection mirrors the Spoken-Content output check on the input side —
-any process whose bundle id starts with `com.electron.wispr-flow` reporting
+poll for any process whose bundle id starts with `com.electron.wispr-flow` reporting
 `kAudioProcessPropertyIsRunningInput != 0`. Validated: Wispr Flow's helper flips that
-flag only while actively dictating and clears it on stop. `desiredGain()` returns 0
-(full mute) whenever this trigger is active, so it wins over a concurrent duck. Menu
-toggle "Pause media while dictating", on by default; turn off Wispr Flow's own mute so
-the two don't both act.
+flag only while actively dictating and clears it on stop, so the same 0.3 s resume
+debounce applies. Always pauses (never ducks) and reuses the same MediaRemote
+pause/play path. Menu toggle "Pause media while dictating", on by default; turn off
+Wispr Flow's own mute so the two don't both act.
 
 ## Files
 - `Engine.swift` — tap-based mute engine + Core Audio helpers.

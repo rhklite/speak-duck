@@ -27,8 +27,11 @@ fi
 
 swiftc Engine.swift SpeakDuckApp.swift -o SpeakDuck
 
-APP="SpeakDuck.app"
-rm -rf "$APP"
+# Assemble and sign OUTSIDE this (Syncthing-synced) folder: the sync daemon tags
+# files with xattrs mid-build, which codesign rejects as "detritus". Build in a
+# temp dir, sign there, then move the finished bundle back into place.
+BUILDDIR="$(mktemp -d)"
+APP="$BUILDDIR/SpeakDuck.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mv SpeakDuck "$APP/Contents/MacOS/SpeakDuck"
 [ -f AppIcon.icns ] && cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
@@ -44,8 +47,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>SpeakDuck</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.1.0</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>LSMinimumSystemVersion</key><string>14.4</string>
   <key>LSUIElement</key><true/>
   <key>NSMicrophoneUsageDescription</key>
@@ -74,4 +77,11 @@ if [ -n "$SIGN_HASH" ]; then
 else
   codesign --force --deep --sign - "$APP" 2>/dev/null; echo "(ad-hoc signed — stable identity missing; pause perms reset each build)"
 fi
+codesign --verify --strict "$APP" || { echo "SIGNATURE VERIFY FAILED"; exit 1; }
+
+# Move the finished, signed bundle back into the repo dir.
+rm -rf "SpeakDuck.app"
+mv "$APP" "SpeakDuck.app"
+rmdir "$BUILDDIR" 2>/dev/null || true
+APP="SpeakDuck.app"
 echo "Built $APP — launch with:  open $APP"

@@ -155,9 +155,9 @@ func dlog(_ msg: String) { if DEBUG { log("· \(msg)") } }
 /// What the engine does while Spoken Content is talking.
 /// - off:   nothing (armed but idle).
 /// - duck:  lower/mute all background audio via the process tap (original behavior).
-/// - pause: pause the macOS "Now Playing" source via a synthesized play/pause media
-///          key, then resume it when speech ends. Reaches any Now-Playing-aware
-///          source (Music, Spotify, Safari, modern Chrome, and iPhone→Mac AirPlay).
+/// - pause: pause the macOS "Now Playing" source via MediaRemote, then resume it
+///          when speech ends. Reaches any Now-Playing-aware source (Music, Spotify,
+///          Safari, modern Chrome, and iPhone→Mac AirPlay).
 enum DuckMode: Int { case off = 0, duck = 1, pause = 2 }
 
 // MARK: - Universal duck engine (on-demand duck / pause)
@@ -169,26 +169,27 @@ final class DuckEngine {
     // Gain applied to background audio while speaking, read live from the real-time
     // audio IO thread. Heap-allocated so the IOProc block touches only a raw pointer
     // (no Swift runtime / locks on the audio thread). 0 == mute, 1 == untouched.
-    // Live gain the replay IOProc reads on the audio thread (raw pointer, no locks).
-    // Holds the currently-applied suppression level while the tap is up; 0 == full mute.
     private let gainPtr: UnsafeMutablePointer<Float>
-    private var appliedGain: Float = 0   // gain of the tap currently up (valid while muting)
 
-    /// Configured "lower volume" level (0...1) for duck mode, from the slider. 0 mutes.
-    /// Kept separate from gainPtr so a pause/dictation full-mute never clobbers it.
-    private var _duckLevel: Float
+    /// Fraction (0...1) to lower background audio to while speaking. 0 mutes.
     var duckLevel: Float {
-        get { _duckLevel }
-        set { _duckLevel = max(0, min(1, newValue)) }
+        get { gainPtr.pointee }
+        set { gainPtr.pointee = max(0, min(1, newValue)) }
     }
 
     /// Called on the main queue when an action becomes active (true) or clears
     /// (false) — used by the menu-bar UI to update its icon and status line.
     var onMute: ((Bool) -> Void)?
 
-    /// When true, also suppress audio while a dictation app (Wispr Flow) holds the mic,
-    /// independent of `mode`. Dictation always full-mutes (never partial), so the mic
-    /// isn't left capturing the media it's supposed to be transcribing over.
+    /// Injected by the AppKit layer: deterministic MediaRemote pause/play of the Now
+    /// Playing session. Used by pause actions (Core Audio can't pause a source, only
+    /// intercept its output).
+    var sendPause: (() -> Void)?
+    var sendPlay: (() -> Void)?
+
+    /// When true, also pause media while a dictation app (Wispr Flow) holds the mic,
+    /// independent of `mode` — dictation always pauses (never ducks), so the mic is
+    /// not left capturing the media it's supposed to be transcribing over.
     var pauseWhileDictating = false
     private let dictationPrefix = "com.electron.wispr-flow"
 
@@ -207,7 +208,9 @@ final class DuckEngine {
     private var playDev = AudioObjectID(kAudioObjectUnknown)
     private var playProc: AudioDeviceIOProcID?
     private let ring = FloatRing(capacity: 1 << 17)   // ~1.3 s stereo @ 48 kHz
-    private var muting = false          // suppression tap is currently up
+    private var muting = false          // duck action active (tap up)
+    private var paused = false          // pause action active (media paused by us)
+    private var active: Bool { muting || paused }
     private var pendingEnd: DispatchWorkItem?
     private let queue = DispatchQueue(label: "speak-duck.engine")
     private var pollTimer: DispatchSourceTimer?
@@ -215,9 +218,8 @@ final class DuckEngine {
     init(voiceBundle: String, resumeDelay: TimeInterval, duckLevel: Float = 0) {
         self.voiceBundle = voiceBundle
         self.resumeDelay = resumeDelay
-        self._duckLevel = max(0, min(1, duckLevel))
         self.gainPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
-        self.gainPtr.initialize(to: 0)
+        self.gainPtr.initialize(to: max(0, min(1, duckLevel)))
     }
 
     deinit { gainPtr.deallocate() }
@@ -239,39 +241,20 @@ final class DuckEngine {
         queue.sync { pendingEnd?.cancel(); pendingEnd = nil; end() }   // resume media if paused
     }
 
-    // One universal suppression (the tap), driven by two independent sources:
-    //  • Spoken Content speaking → suppress at the selected mode's level (duck or mute).
-    //  • a dictation app holding the mic → always full-mute.
-    // Suppress while either wants it; the lower gain wins if both do. The pause/resume
-    // is the same mechanism — the only difference is what triggers it.
     private func poll() {
         let objs = voiceObjects()
-        if let g = desiredGain(voice: objs) {
+        let speaking = mode != .off && objs.contains { uint32Prop($0, kAudioProcessPropertyIsRunningOutput) != 0 }
+        let dictating = pauseWhileDictating && dictationActive()
+        if speaking || dictating {
             pendingEnd?.cancel(); pendingEnd = nil
-            if !muting {
-                beginSuppress(gain: g, excluding: objs)
-            } else if (g > 0) != (appliedGain > 0) {
-                endMute(); beginSuppress(gain: g, excluding: objs)   // crossed mute<->partial: rebuild
-            } else if g != appliedGain {
-                appliedGain = g; gainPtr.pointee = g                 // partial level change: live
-            }
-        } else if muting, pendingEnd == nil {
-            let w = DispatchWorkItem { [weak self] in self?.endMute(); self?.pendingEnd = nil }
+            // Spoken Content uses the selected mode (duck or pause); a dictation-only
+            // trigger always pauses. Either trigger keeps media suppressed until both clear.
+            if !active { if speaking { begin(excluding: objs) } else { beginPause(voice: objs) } }
+        } else if active, pendingEnd == nil {
+            let w = DispatchWorkItem { [weak self] in self?.end(); self?.pendingEnd = nil }
             pendingEnd = w
             queue.asyncAfter(deadline: .now() + resumeDelay, execute: w)
         }
-    }
-
-    /// Target suppression gain right now, or nil for none. 0 = full mute, >0 = duck level.
-    private func desiredGain(voice objs: [AudioObjectID]) -> Float? {
-        var g: Float? = nil
-        if mode != .off, objs.contains(where: { uint32Prop($0, kAudioProcessPropertyIsRunningOutput) != 0 }) {
-            g = (mode == .pause) ? 0 : duckLevel
-        }
-        if pauseWhileDictating, dictationActive() {
-            g = min(g ?? 1, 0)   // dictation always forces full mute
-        }
-        return g
     }
 
     /// True while a dictation app (e.g. Wispr Flow) is capturing the mic — the input
@@ -284,8 +267,55 @@ final class DuckEngine {
         return false
     }
 
-    // Unwind whatever suppression is active (called on stop and on live mode change).
-    private func end() { if muting { endMute() } }
+    // Dispatch the current mode's start/stop action. `end()` keys off the active
+    // flags (not `mode`) so a mid-action mode switch still unwinds correctly.
+    private func begin(excluding objs: [AudioObjectID]) {
+        switch mode {
+        case .off:   break
+        case .duck:  beginMute(excluding: objs)
+        case .pause: beginPause(voice: objs)
+        }
+    }
+
+    private func end() {
+        if muting { endMute() }
+        if paused { endPause() }
+    }
+
+    // MARK: Pause action (MediaRemote)
+
+    // True if any process other than the voice, ourselves, and the dictation app is
+    // currently producing output. Guards the resume: we only send play afterwards if
+    // media was actually playing when the trigger began — else a stray "play" on
+    // release would START playback the user never had. The dictation app is excluded
+    // because its helper keeps an output stream running even when idle.
+    private func mediaIsPlaying(excluding voice: [AudioObjectID]) -> Bool {
+        let voiceSet = Set(voice)
+        let me = getpid()
+        for obj in processList() {
+            if voiceSet.contains(obj) || pidProp(obj) == me { continue }
+            if let b = bundleID(obj), b.hasPrefix(dictationPrefix) { continue }
+            if uint32Prop(obj, kAudioProcessPropertyIsRunningOutput) != 0 { return true }
+        }
+        return false
+    }
+
+    private func beginPause(voice: [AudioObjectID]) {
+        // No mode guard: callers gate this (begin() only for .pause; poll() for dictation).
+        guard mediaIsPlaying(excluding: voice) else { dlog("pause: nothing playing → skip"); return }
+        sendPause?()
+        paused = true
+        log("speaking → media paused")
+        DispatchQueue.main.async { self.onMute?(true) }
+    }
+
+    private func endPause() {
+        guard paused else { return }
+        paused = false
+        sendPlay?()
+        log("speech ended → media resumed")
+        DispatchQueue.main.async { self.onMute?(false) }
+    }
 
     // Start the replay IOProc on the real output device: pulls captured background
     // audio from the ring at the current gain. Doing IO here also registers OUR
@@ -323,14 +353,13 @@ final class DuckEngine {
         playDev = AudioObjectID(kAudioObjectUnknown)
     }
 
-    private func beginSuppress(gain: Float, excluding objs: [AudioObjectID]) {
-        appliedGain = gain
-        gainPtr.pointee = gain
+    private func beginMute(excluding objs: [AudioObjectID]) {
+        guard mode == .duck else { return }
 
         // Partial duck: start replay first, then exclude ourselves from the tap.
         var excluded = objs
         var replaying = false
-        if gain > 0, startReplay() {
+        if gainPtr.pointee > 0, startReplay() {
             var me = selfProcessObject()
             for _ in 0..<4 where me == nil { usleep(50_000); me = selfProcessObject() }
             if let me {
@@ -379,7 +408,7 @@ final class DuckEngine {
         AudioDeviceStart(aggID, ioProc)
         muting = true
         let pct = Int((gainPtr.pointee * 100).rounded())
-        log("suppress → media \(replaying ? "lowered to \(pct)%" : "muted") (voice excluded: \(objs.count))")
+        log("speaking → media \(replaying ? "lowered to \(pct)%" : "muted") (voice excluded: \(objs.count))")
         DispatchQueue.main.async { self.onMute?(true) }
     }
 
@@ -388,7 +417,7 @@ final class DuckEngine {
         teardown()
         muting = false
         if was {
-            log("release → media restored")
+            log("speech ended → media restored")
             DispatchQueue.main.async { self.onMute?(false) }
         }
     }

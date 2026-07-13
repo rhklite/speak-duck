@@ -9,8 +9,26 @@ import ServiceManagement
 let TARGET_BUNDLE_ID = "com.apple.accessibility.AXVisualSupportAgent"  // Speak Selection + hover-speak
 let RESUME_DELAY: TimeInterval = 0.3
 
-// Suppression is done entirely by the Core Audio tap in Engine.swift — it mutes/lowers
-// ALL output universally, so no media-key posting and no Accessibility grant are needed.
+// MARK: - MediaRemote pause/play
+
+// Deterministic pause/play of the macOS "Now Playing" session via the private
+// MediaRemote framework — the same path Control Center's controls use. Replaces the
+// old synthesized play/pause media key, which (a) was a blind TOGGLE that could
+// invert state, and (b) is swallowed system-wide on machines where another app
+// (dictation tools, Logitech agents) grabs media keys — verified: the key never
+// reached players on this setup while MRMediaRemoteSendCommand(pause) worked.
+// Needs no Accessibility grant. Send-command is not gated (the now-playing *query*
+// functions are, so we don't rely on them).
+private enum MediaRemote {
+    private typealias SendCommand = @convention(c) (Int32, AnyObject?) -> Bool
+    private static let send: SendCommand? = {
+        guard let h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW),
+              let sym = dlsym(h, "MRMediaRemoteSendCommand") else { return nil }
+        return unsafeBitCast(sym, to: SendCommand.self)
+    }()
+    static func pause() { _ = send?(1, nil) }   // kMRPause
+    static func play()  { _ = send?(0, nil) }   // kMRPlay
+}
 
 @main
 struct SpeakDuckApp {
@@ -48,7 +66,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var pauseWhileDictating = true   // pause media while dictating, on by default
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        setvbuf(stdout, nil, _IONBF, 0)   // flush debug logs immediately when captured to a file
         if let raw = UserDefaults.standard.object(forKey: modeKey) as? Int, let m = DuckMode(rawValue: raw) {
             mode = m
         }
@@ -63,6 +80,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let engine = DuckEngine(voiceBundle: TARGET_BUNDLE_ID, resumeDelay: RESUME_DELAY, duckLevel: duckLevel)
         engine.mode = mode
         engine.pauseWhileDictating = pauseWhileDictating
+        engine.sendPause = { MediaRemote.pause() }
+        engine.sendPlay = { MediaRemote.play() }
         engine.onMute = { [weak self] m in self?.muting = m; self?.refresh() }
         engine.start()
         self.engine = engine
