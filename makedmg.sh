@@ -76,11 +76,13 @@ end tell
 APPLESCRIPT
 
 sync; sleep 1
-# Force the bundle's "has custom icon" FinderInfo flag on the mounted volume so the
-# custom Icon actually displays after install (cp/hdiutil otherwise drop this bit).
-xattr -wx com.apple.FinderInfo "00 00 00 00 00 00 00 00 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00" "/Volumes/$VOL/$APP" 2>/dev/null || true
 sync; sleep 1
 hdiutil detach "/Volumes/$VOL" >/dev/null 2>&1 || hdiutil detach "/Volumes/$VOL" -force >/dev/null 2>&1
+
+# NOTE: Do NOT set the com.apple.FinderInfo custom-icon bit here. This app
+# provides its icon via CFBundleIconFile (Resources/AppIcon.icns). Forcing the
+# custom-icon flag with no Icon\\r resource makes Finder render the app as a
+# plain folder in the DMG. LaunchServices uses AppIcon.icns automatically.
 
 # 5) Compress to a distributable read-only DMG.
 rm -f "$DMG"
