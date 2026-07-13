@@ -45,6 +45,31 @@ Earlier dead ends (kept for the record): MediaRemote (gated / blind to Chrome),
 synthesized media keys (Chrome not in Now Playing), per-tab AppleScript+JS
 (worked but Chrome-only). All replaced by the universal tap.
 
+## Pause mode (media-key)
+A menu radio picks the action taken while speaking: **Do nothing** / **Lower volume**
+(the tap above) / **Pause media**. One action runs at a time — pause does *not* also
+duck. The mode lives on `DuckEngine` (`.off/.duck/.pause`); the same 0.05 s poll and
+0.3 s resume debounce drive both duck and pause, and changing mode live unwinds
+whatever was active (restores volume / resumes media) so media is never left stuck.
+
+Pause works by synthesizing the hardware **Play/Pause key** (`NX_KEYTYPE_PLAY`, via
+`NSEvent .systemDefined` → `cgEvent.post(.cghidEventTap)`). macOS routes it to the
+current *Now Playing* session, so unlike the old dead-ends this reaches Safari and
+modern Chrome/YouTube (which now register with Now Playing) — and, notably, an
+**iPhone AirPlaying to this Mac**: the key is forwarded back to the phone, the same
+path Control Center's Now Playing controls use. Per-app AppleScript could never do
+that; this is why media-key won over per-app for the AirPlay case.
+
+Guards & caveats:
+- Play/Pause is a *toggle*, so we only fire it when something is actually playing
+  (any non-voice, non-self process with `IsRunningOutput`) — else it would *start*
+  playback. Resume is driven by our own "we paused" flag, not by re-polling.
+- Posting keys to other apps needs **Accessibility** (System Settings → Privacy &
+  Security → Accessibility). Choosing pause mode the first time prompts for it; the
+  action degrades quietly if denied. Ad-hoc re-signing can drop the grant → re-add.
+- Only the single Now Playing app is paused (not every source at once, the way
+  ducking mutes everything). Verify AirPlay-from-iPhone routing on hardware.
+
 ## Files
 - `Engine.swift` — tap-based mute engine + Core Audio helpers.
 - `SpeakDuckApp.swift` — menu-bar app. `speak-duck.swift` — headless CLI (debug).
