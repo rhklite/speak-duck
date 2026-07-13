@@ -70,6 +70,17 @@ Guards & caveats:
 - Only the single Now Playing app is paused (not every source at once, the way
   ducking mutes everything). Verify AirPlay-from-iPhone routing on hardware.
 
+## Pause while dictating
+A separate trigger, independent of the while-speaking mode: whenever a dictation app
+holds the mic, pause the current Now Playing source so playback doesn't bleed into the
+transcription. Detection mirrors the Spoken-Content output check on the input side —
+poll for any process whose bundle id starts with `com.electron.wispr-flow` reporting
+`kAudioProcessPropertyIsRunningInput != 0`. Validated: Wispr Flow's helper flips that
+flag only while actively dictating and clears it on stop, so the same 0.3 s resume
+debounce applies. Always pauses (never ducks) and reuses the `.pause` media-key path,
+so it needs the same Accessibility grant. Menu toggle "Pause media while dictating",
+on by default; turn off Wispr Flow's own mute so the two don't both act.
+
 ## Files
 - `Engine.swift` — tap-based mute engine + Core Audio helpers.
 - `SpeakDuckApp.swift` — menu-bar app. `speak-duck.swift` — headless CLI (debug).

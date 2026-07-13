@@ -6,6 +6,8 @@ A tiny macOS menu-bar app that quiets background audio while Spoken Content is s
 - **Pause media** — pauses the current *Now Playing* source (Music, Spotify, Safari, Chrome, or an iPhone AirPlaying to this Mac) and resumes it when speech stops. Reaches any Now-Playing-aware source; needs a one-time Accessibility grant.
 - **Do nothing** — armed but idle.
 
+Independently of the mode above, **Pause media while dictating** (on by default) pauses the current Now Playing source whenever a dictation app (e.g. Wispr Flow) holds the microphone — so your media doesn't bleed into what you're dictating — and resumes it when you stop. Toggle it from the menu; disable your dictation app's own "mute audio" setting so only SpeakDuck acts.
+
 Runs in the menu bar only (no Dock icon).
 
 ## Install

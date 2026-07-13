@@ -185,6 +185,12 @@ final class DuckEngine {
     /// in `.pause` mode (Core Audio can't pause a source, only intercept its output).
     var sendPlayPause: (() -> Void)?
 
+    /// When true, also pause media while a dictation app (Wispr Flow) holds the mic,
+    /// independent of `mode` — dictation always pauses (never ducks), so the mic is
+    /// not left capturing the media it's supposed to be transcribing over.
+    var pauseWhileDictating = false
+    private let dictationPrefix = "com.electron.wispr-flow"
+
     /// Active action mode. Changing it live tears down whatever the old mode was
     /// doing (restores volume / resumes media) so we never leave media stuck.
     var mode: DuckMode = .duck {
@@ -234,17 +240,29 @@ final class DuckEngine {
     }
 
     private func poll() {
-        if mode == .off { return }
         let objs = voiceObjects()
-        let speaking = objs.contains { uint32Prop($0, kAudioProcessPropertyIsRunningOutput) != 0 }
-        if speaking {
+        let speaking = mode != .off && objs.contains { uint32Prop($0, kAudioProcessPropertyIsRunningOutput) != 0 }
+        let dictating = pauseWhileDictating && dictationActive()
+        if speaking || dictating {
             pendingEnd?.cancel(); pendingEnd = nil
-            if !active { begin(excluding: objs) }
+            // Spoken Content uses the selected mode (duck or pause); a dictation-only
+            // trigger always pauses. Either trigger keeps media suppressed until both clear.
+            if !active { if speaking { begin(excluding: objs) } else { beginPause(voice: objs) } }
         } else if active, pendingEnd == nil {
             let w = DispatchWorkItem { [weak self] in self?.end(); self?.pendingEnd = nil }
             pendingEnd = w
             queue.asyncAfter(deadline: .now() + resumeDelay, execute: w)
         }
+    }
+
+    /// True while a dictation app (e.g. Wispr Flow) is capturing the mic — the input
+    /// mirror of the Spoken-Content output check. Its helper process flips
+    /// kAudioProcessPropertyIsRunningInput only while actively dictating.
+    private func dictationActive() -> Bool {
+        for obj in processList() where uint32Prop(obj, kAudioProcessPropertyIsRunningInput) != 0 {
+            if let b = bundleID(obj), b.hasPrefix(dictationPrefix) { return true }
+        }
+        return false
     }
 
     // Dispatch the current mode's start/stop action. `end()` keys off the active
@@ -278,7 +296,7 @@ final class DuckEngine {
     }
 
     private func beginPause(voice: [AudioObjectID]) {
-        guard mode == .pause else { return }
+        // No mode guard: callers gate this (begin() only for .pause; poll() for dictation).
         guard mediaIsPlaying(excluding: voice) else { dlog("pause: nothing playing → skip"); return }
         sendPlayPause?()
         paused = true

@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var duckItem: NSMenuItem!
     private var pauseItem: NSMenuItem!
     private var loginItem: NSMenuItem!
+    private var dictateItem: NSMenuItem!
     private var levelSlider: NSSlider!
     private var levelLabel: NSTextField!
     private var engine: DuckEngine?
@@ -73,6 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let levelKey = "duckLevel"
     private var duckLevel: Float = 0.3   // lower background to 30% by default
 
+    private let dictateKey = "pauseWhileDictating"
+    private var pauseWhileDictating = true   // pause media while dictating, on by default
+
     func applicationDidFinishLaunching(_ note: Notification) {
         if let raw = UserDefaults.standard.object(forKey: modeKey) as? Int, let m = DuckMode(rawValue: raw) {
             mode = m
@@ -80,10 +84,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if UserDefaults.standard.object(forKey: levelKey) != nil {
             duckLevel = Float(UserDefaults.standard.double(forKey: levelKey))
         }
+        if UserDefaults.standard.object(forKey: dictateKey) != nil {
+            pauseWhileDictating = UserDefaults.standard.bool(forKey: dictateKey)
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
         let engine = DuckEngine(voiceBundle: TARGET_BUNDLE_ID, resumeDelay: RESUME_DELAY, duckLevel: duckLevel)
         engine.mode = mode
+        engine.pauseWhileDictating = pauseWhileDictating
         engine.sendPlayPause = { postPlayPauseKey() }
         engine.onMute = { [weak self] m in self?.muting = m; self?.refresh() }
         engine.start()
@@ -145,6 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // The level slider only applies to ducking; grey it out in the other modes.
         levelSlider?.isEnabled = (mode == .duck)
         levelLabel?.textColor  = (mode == .duck) ? .secondaryLabelColor : .tertiaryLabelColor
+        dictateItem?.state = pauseWhileDictating ? .on : .off
         loginItem?.state = loginEnabled ? .on : .off
     }
 
@@ -169,6 +178,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pauseItem = addModeItem("Pause media", mode: .pause, to: menu)
 
         menu.addItem(makeLevelItem())
+
+        menu.addItem(.separator())
+        dictateItem = NSMenuItem(title: "Pause media while dictating",
+                                 action: #selector(toggleDictate), keyEquivalent: "")
+        dictateItem.target = self
+        menu.addItem(dictateItem)
 
         loginItem = NSMenuItem(title: "Launch at login", action: #selector(toggleLogin), keyEquivalent: "")
         loginItem.target = self
@@ -220,6 +235,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.tag = m.rawValue
         menu.addItem(item)
         return item
+    }
+
+    @objc private func toggleDictate() {
+        pauseWhileDictating.toggle()
+        // Pausing media posts media keys to other apps → needs Accessibility, same as
+        // pause mode. Prompt the first time it's enabled without the grant.
+        if pauseWhileDictating && !accessibilityTrusted(prompt: false) {
+            accessibilityTrusted(prompt: true)
+        }
+        UserDefaults.standard.set(pauseWhileDictating, forKey: dictateKey)
+        engine?.pauseWhileDictating = pauseWhileDictating
+        refresh()
     }
 
     @objc private func selectMode(_ sender: NSMenuItem) {
