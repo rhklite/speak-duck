@@ -77,6 +77,16 @@ APPLESCRIPT
 
 sync; sleep 1
 sync; sleep 1
+
+# Strip the com.apple.FinderInfo xattr that Finder writes onto the bundle during
+# the icon-layout step above. It invalidates the app's code signature, so the
+# shipped DMG would otherwise fail `codesign --verify` and macOS reports the app
+# as "damaged" even after the user clears the download quarantine. Icon positions
+# live in the volume's .DS_Store (not the app's FinderInfo), so layout is intact.
+xattr -cr "/Volumes/$VOL/$APP"
+codesign --verify --strict "/Volumes/$VOL/$APP" \
+  || { echo "Signature invalid in packaged app — aborting"; exit 1; }
+
 hdiutil detach "/Volumes/$VOL" >/dev/null 2>&1 || hdiutil detach "/Volumes/$VOL" -force >/dev/null 2>&1
 
 # NOTE: Do NOT set the com.apple.FinderInfo custom-icon bit here. This app

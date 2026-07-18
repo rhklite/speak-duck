@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.3 — 2026-07-13
+
+### Fixed
+- The distributed DMG shipped an app whose code signature was invalidated by a
+  `com.apple.FinderInfo` xattr that Finder writes during the DMG icon-layout step,
+  so macOS could report **"SpeakDuck is damaged and can't be opened"** even after
+  clearing the download quarantine. `makedmg.sh` now strips that xattr and
+  re-verifies the signature before packaging.
+
+### Docs
+- README documents the one-time `xattr -dr com.apple.quarantine` step (or Settings
+  ▸ Privacy & Security ▸ Open Anyway) needed because the app is self-signed rather
+  than Apple-notarized.
+
 ## 1.1.2 — 2026-07-13
 
 ### Fixed

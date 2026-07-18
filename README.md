@@ -14,6 +14,14 @@ Runs in the menu bar only (no Dock icon).
 
 Download **`SpeakDuck.dmg`** from the [latest release](https://github.com/rhklite/speak-duck/releases/latest), open it, and drag **SpeakDuck** onto **Applications**. Grant the audio permission it requests on first launch.
 
+SpeakDuck is signed with a self-issued certificate (not Apple-notarized), so macOS Gatekeeper blocks the first launch as coming from an "unidentified developer." Clear the download quarantine once, from Terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/SpeakDuck.app
+```
+
+Then open it normally. (Alternative: try to open it, then click **Open Anyway** in System Settings ▸ Privacy & Security.)
+
 ## Build from source
 
 ```sh
