@@ -193,6 +193,20 @@ final class DuckEngine {
     var pauseWhileDictating = false
     private let dictationPrefix = "com.electron.wispr-flow"
 
+    // Non-pausable system audio sources whose output must NOT be read as "media
+    // playing": MediaRemote play/pause has no effect on them, so counting them as
+    // media makes us arm a resume and then fire a global PLAY that inadvertently
+    // unpauses the user's real (already-paused) media. Real MediaRemote-controllable
+    // media always comes from an actual app (Chrome/Music/Spotify/Safari…), never
+    // these daemons, so excluding them is safe. avconferenced carries FaceTime /
+    // AirPlay / call audio; systemsoundserverd renders alert / UI / notification
+    // sounds. Matched by bundle-ID prefix; extend as other daemons surface.
+    private let nonMediaPrefixes = [
+        "com.apple.avconferenced",
+        "systemsoundserverd",
+        "com.apple.systemsoundserverd",
+    ]
+
     /// Active action mode. Changing it live tears down whatever the old mode was
     /// doing (restores volume / resumes media) so we never leave media stuck.
     var mode: DuckMode = .duck {
@@ -302,7 +316,7 @@ final class DuckEngine {
         let me = getpid()
         for obj in processList() {
             if voiceSet.contains(obj) || pidProp(obj) == me { continue }
-            if let b = bundleID(obj), b.hasPrefix(dictationPrefix) { continue }
+            if let b = bundleID(obj), b.hasPrefix(dictationPrefix) || nonMediaPrefixes.contains(where: b.hasPrefix) { continue }
             if uint32Prop(obj, kAudioProcessPropertyIsRunningOutput) != 0 { return true }
         }
         return false
@@ -339,20 +353,23 @@ final class DuckEngine {
     /// ~175 ms to warm up before real audio flows (measured), so the probe samples
     /// with early exit: it returns as soon as anything audible is seen and only
     /// declares silence after `window` (which must comfortably exceed warm-up).
-    /// Returns +inf if the probe can't be built, so callers fail open (treat as
-    /// playing) and behavior degrades to the old flag-only guard.
+    /// Returns 0 (silent) if the probe can't be built, so callers FAIL CLOSED —
+    /// skip the pause rather than arm a resume that could later fire a global PLAY
+    /// and unpause the user's real media. A missed pause is the cheaper failure.
     private func audibleMediaPeak(excluding voice: [AudioObjectID], window: TimeInterval) -> Float {
         var excluded = voice
         if let me = selfProcessObject() { excluded.append(me) }
         for obj in processList() {
-            if let b = bundleID(obj), b.hasPrefix(dictationPrefix) { excluded.append(obj) }
+            if let b = bundleID(obj), b.hasPrefix(dictationPrefix) || nonMediaPrefixes.contains(where: b.hasPrefix) {
+                excluded.append(obj)   // keep FaceTime/AirPlay, notification/UI sounds & dictation out of the peak
+            }
         }
         let desc = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
         desc.name = "speak-duck-probe"; desc.isPrivate = true; desc.muteBehavior = .unmuted
         var probeTap = AudioObjectID(kAudioObjectUnknown)
-        guard AudioHardwareCreateProcessTap(desc, &probeTap) == noErr else { return .infinity }
+        guard AudioHardwareCreateProcessTap(desc, &probeTap) == noErr else { dlog("probe: tap create failed → fail-closed"); return 0 }
         defer { AudioHardwareDestroyProcessTap(probeTap) }
-        guard let outUID = deviceUID(defaultOutputDevice()) else { return .infinity }
+        guard let outUID = deviceUID(defaultOutputDevice()) else { dlog("probe: output UID nil → fail-closed"); return 0 }
         let dict: [String: Any] = [
             kAudioAggregateDeviceNameKey: "speak-duck-probe-agg",
             kAudioAggregateDeviceUIDKey: "speak-duck-probe-agg-\(getpid())",
@@ -367,7 +384,7 @@ final class DuckEngine {
             ]],
         ]
         var probeAgg = AudioObjectID(kAudioObjectUnknown)
-        guard AudioHardwareCreateAggregateDevice(dict as CFDictionary, &probeAgg) == noErr else { return .infinity }
+        guard AudioHardwareCreateAggregateDevice(dict as CFDictionary, &probeAgg) == noErr else { dlog("probe: aggregate create failed → fail-closed"); return 0 }
         defer { AudioHardwareDestroyAggregateDevice(probeAgg) }
         let peakPtr = UnsafeMutablePointer<Float>.allocate(capacity: 1)
         peakPtr.initialize(to: 0)
@@ -386,7 +403,7 @@ final class DuckEngine {
                 if let d = b.mData { memset(d, 0, Int(b.mDataByteSize)) }
             }
         }
-        guard AudioDeviceCreateIOProcIDWithBlock(&proc, probeAgg, nil, block) == noErr, let p = proc else { return .infinity }
+        guard AudioDeviceCreateIOProcIDWithBlock(&proc, probeAgg, nil, block) == noErr, let p = proc else { dlog("probe: ioproc create failed → fail-closed"); return 0 }
         AudioDeviceStart(probeAgg, p)
         let steps = max(1, Int(window / 0.025))
         for _ in 0..<steps {

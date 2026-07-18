@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.4 — 2026-07-17
+
+### Fixed
+- Triggering a read or dictation while a **FaceTime/AirPlay call** or a
+  **notification/alert sound** was audible could inadvertently **unpause media the
+  user had already paused**. The audibility probe measured *global* output, so
+  non-pausable system audio (FaceTime via `avconferenced`, alert sounds via
+  `systemsoundserverd`) counted as "media playing" — arming a resume that then
+  fired a global MediaRemote PLAY on trigger-clear. These daemons are now excluded
+  from both the playing-check and the probe, exactly like the dictation app.
+- The probe now **fails closed**: if the capture tap can't be built it treats
+  output as silent (skip the pause) instead of failing open and arming a resume,
+  removing an intermittent path back to the same spurious-unpause bug.
+
 ## 1.1.3 — 2026-07-13
 
 ### Fixed
